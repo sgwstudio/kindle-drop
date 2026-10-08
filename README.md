@@ -23,6 +23,8 @@ ln -s "$PWD/kindle-drop/kindle-drop" /opt/homebrew/bin/kindle-drop
 2. Close anything else that might grab it (Calibre, Android File Transfer, OpenMTP).
 3. Run `kindle-drop` with one or more files.
 
+When the send finishes, the Kindle ejects itself. It leaves USB mode and shows a battery notice while it indexes the new books. That's expected. To send more, unplug and replug it.
+
 AZW3, MOBI, PDF and TXT files go across as-is. Calibre converts everything else (EPUB, FB2, DOCX...) to AZW3 first.
 
 ## License
