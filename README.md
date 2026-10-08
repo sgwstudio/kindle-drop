@@ -17,11 +17,19 @@ git clone https://github.com/sgwstudio/kindle-drop.git
 ln -s "$PWD/kindle-drop/kindle-drop" /opt/homebrew/bin/kindle-drop
 ```
 
+On first run, kindle-drop compiles a small helper (`mtp-drop.c`) that talks to the Kindle. That needs Apple's command line tools (`xcode-select --install`).
+
 ## Use
 
 1. Plug in the Kindle and unlock it.
 2. Close anything else that might grab it (Calibre, Android File Transfer, OpenMTP).
 3. Run `kindle-drop` with one or more files.
+
+To swap a book already on the Kindle, add `--replace`. It deletes the file with the same name on the Kindle, then sends the new one:
+
+```bash
+kindle-drop --replace book.pdf
+```
 
 When the send finishes, the Kindle ejects itself. It leaves USB mode and shows a battery notice while it indexes the new books. That's expected. To send more, unplug and replug it.
 
