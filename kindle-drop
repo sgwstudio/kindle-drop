@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# kindle-drop: convert ebooks and copy them to a USB-connected Kindle over MTP.
+# usage: kindle-drop book.epub [more books...]
+set -euo pipefail
+export LANG="${LANG:-en_US.UTF-8}"
+
+[ $# -gt 0 ] || { echo "usage: kindle-drop <book> [more books...]"; exit 1; }
+
+command -v mtp-sendfile >/dev/null || { echo "missing libmtp: brew install libmtp" >&2; exit 1; }
+convert=$(command -v ebook-convert || echo /Applications/calibre.app/Contents/MacOS/ebook-convert)
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+failed=0
+
+for book in "$@"; do
+  [ -f "$book" ] || { echo "✗ $book: not found"; failed=1; continue; }
+  name=$(basename "$book")
+  ext=$(echo "${name##*.}" | tr '[:upper:]' '[:lower:]')
+
+  # Kindle reads these as-is. Everything else (epub, fb2, docx...) becomes azw3.
+  case "$ext" in
+    azw3|azw|mobi|kfx|pdf|txt) file="$book" ;;
+    *)
+      [ -x "$convert" ] || { echo "missing calibre: brew install --cask calibre" >&2; exit 1; }
+      file="$tmp/${name%.*}.azw3"
+      echo "… converting $name"
+      "$convert" "$book" "$file" >/dev/null 2>&1 || { echo "✗ $name: conversion failed"; failed=1; continue; }
+      ;;
+  esac
+
+  # mtp-sendfile exits 0 even with no device, so check its output instead.
+  echo "… sending $(basename "$file")"
+  if mtp-sendfile "$file" /documents 2>&1 | grep -q "New file ID"; then
+    echo "✓ $(basename "$file")"
+  else
+    echo "✗ $(basename "$file"): send failed. Is the Kindle plugged in and unlocked?"
+    failed=1
+  fi
+done
+
+exit $failed
