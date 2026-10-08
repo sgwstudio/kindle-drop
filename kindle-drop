@@ -6,37 +6,48 @@ export LANG="${LANG:-en_US.UTF-8}"
 
 [ $# -gt 0 ] || { echo "usage: kindle-drop <book> [more books...]"; exit 1; }
 
-command -v mtp-sendfile >/dev/null || { echo "missing libmtp: brew install libmtp" >&2; exit 1; }
+command -v mtp-connect >/dev/null || { echo "missing libmtp: brew install libmtp" >&2; exit 1; }
 convert=$(command -v ebook-convert || echo /Applications/calibre.app/Contents/MacOS/ebook-convert)
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+sends=()
 failed=0
 
+# Stage every book in $tmp. libmtp splits "local,remote" on the first comma,
+# so staged names drop commas.
 for book in "$@"; do
   [ -f "$book" ] || { echo "✗ $book: not found"; failed=1; continue; }
   name=$(basename "$book")
+  base=${name%.*}
+  base=${base//,/}
   ext=$(echo "${name##*.}" | tr '[:upper:]' '[:lower:]')
 
   # Kindle reads these as-is. Everything else (epub, fb2, docx...) becomes azw3.
   case "$ext" in
-    azw3|azw|mobi|kfx|pdf|txt) file="$book" ;;
+    azw3|azw|mobi|kfx|pdf|txt) cp "$book" "$tmp/$base.$ext" && file="$tmp/$base.$ext" ;;
     *)
       [ -x "$convert" ] || { echo "missing calibre: brew install --cask calibre" >&2; exit 1; }
-      file="$tmp/${name%.*}.azw3"
+      file="$tmp/$base.azw3"
       echo "… converting $name"
       "$convert" "$book" "$file" >/dev/null 2>&1 || { echo "✗ $name: conversion failed"; failed=1; continue; }
       ;;
   esac
-
-  # mtp-sendfile exits 0 even with no device, so check its output instead.
-  echo "… sending $(basename "$file")"
-  if mtp-sendfile "$file" /documents 2>&1 | grep -q "New file ID"; then
-    echo "✓ $(basename "$file")"
-  else
-    echo "✗ $(basename "$file"): send failed. Is the Kindle plugged in and unlocked?"
-    failed=1
-  fi
+  sends+=(--sendfile "$file,/documents")
 done
+
+[ ${#sends[@]} -gt 0 ] || exit 1
+
+# One MTP session for all books: the Kindle can drop off USB when a session ends.
+total=$(( ${#sends[@]} / 2 ))
+echo "… sending $total book(s)"
+sent=$(mtp-connect "${sends[@]}" 2>&1 | grep -c "New file ID" || true)
+
+if [ "$sent" -eq "$total" ]; then
+  echo "✓ sent $sent book(s) to the Kindle"
+else
+  echo "✗ sent $sent of $total. Is the Kindle plugged in and unlocked?"
+  failed=1
+fi
 
 exit $failed
