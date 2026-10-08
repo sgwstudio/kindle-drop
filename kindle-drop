@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # kindle-drop: convert ebooks and copy them to a USB-connected Kindle over MTP.
-# usage: kindle-drop book.epub [more books...]
+# usage: kindle-drop [--replace] book.epub [more books...]
 set -euo pipefail
 export LANG="${LANG:-en_US.UTF-8}"
 
-[ $# -gt 0 ] || { echo "usage: kindle-drop <book> [more books...]"; exit 1; }
+replace=""
+[ "${1:-}" = "--replace" ] && { replace=1; shift; }
+[ $# -gt 0 ] || { echo "usage: kindle-drop [--replace] <book> [more books...]"; exit 1; }
 
-command -v mtp-connect >/dev/null || { echo "missing libmtp: brew install libmtp" >&2; exit 1; }
+# Build the MTP helper on first run, and again whenever its source changes.
+here=$(dirname "$(readlink -f "$0")")
+helper="$here/mtp-drop"
+if [ ! -x "$helper" ] || [ "$here/mtp-drop.c" -nt "$helper" ]; then
+  prefix=$(brew --prefix)
+  [ -f "$prefix/include/libmtp.h" ] || { echo "missing libmtp: brew install libmtp" >&2; exit 1; }
+  cc -O2 -o "$helper" "$here/mtp-drop.c" -I"$prefix/include" -L"$prefix/lib" -lmtp \
+    || { echo "could not build mtp-drop: xcode-select --install" >&2; exit 1; }
+fi
 convert=$(command -v ebook-convert || echo /Applications/calibre.app/Contents/MacOS/ebook-convert)
 
 tmp=$(mktemp -d)
@@ -15,14 +25,17 @@ sends=()
 failed=0
 screen=1680  # Paperwhite screen height in pixels
 
-# A scan is a PDF whose middle page is one image as wide as the page.
-is_scan() {
+# A scan is a PDF whose middle page holds an image as wide as the page.
+# It needs cleaning unless that page is already one black-and-white image.
+is_messy_scan() {
   local n p w
   n=$(pdfinfo "$1" 2>/dev/null | awk '/^Pages:/{print $2}')
   [ -n "$n" ] || return 1
   p=$(( (n + 1) / 2 ))
   w=$(pdfinfo -f $p -l $p "$1" | awk '/size:/{print $4; exit}')
-  pdfimages -list -f $p -l $p "$1" | awk -v w="$w" 'NR>2 && $3=="image" && $13>0 && $4/$13*72 >= 0.9*w {f=1} END{exit !f}'
+  pdfimages -list -f $p -l $p "$1" | awk -v w="$w" '
+    NR>2 { n++; if ($8 != 1) deep=1; if ($3=="image" && $13>0 && $4/$13*72 >= 0.9*w) full=1 }
+    END { exit !(full && (n > 1 || deep)) }'
 }
 
 # Scans often stack several image layers per page and tint the paper grey,
@@ -40,8 +53,8 @@ clean_scan() {
   [ -z "$title" ] || "$(dirname "$convert")/ebook-meta" "$2" -t "$title" ${author:+-a "$author"} >/dev/null 2>&1 || true
 }
 
-# Stage every book in $tmp. libmtp splits "local,remote" on the first comma,
-# so staged names drop commas.
+# Stage every book in $tmp. Staged names drop commas, which keeps names on
+# the Kindle the same as earlier versions sent, so --replace finds them.
 for book in "$@"; do
   [ -f "$book" ] || { echo "✗ $book: not found"; failed=1; continue; }
   name=$(basename "$book")
@@ -56,7 +69,7 @@ for book in "$@"; do
       command -v pdfimages >/dev/null && command -v magick >/dev/null \
         || { echo "missing PDF tools: brew install poppler imagemagick" >&2; exit 1; }
       file="$tmp/$base.pdf"
-      if is_scan "$book"; then
+      if is_messy_scan "$book"; then
         echo "… cleaning scan $name"
         clean_scan "$book" "$file" || { echo "✗ $name: scan cleanup failed"; failed=1; continue; }
       else
@@ -70,15 +83,17 @@ for book in "$@"; do
       "$convert" "$book" "$file" >/dev/null 2>&1 || { echo "✗ $name: conversion failed"; failed=1; continue; }
       ;;
   esac
-  sends+=(--sendfile "$file,/documents")
+  sends+=("$file")
 done
 
 [ ${#sends[@]} -gt 0 ] || exit 1
 
-# One MTP session for all books: the Kindle can drop off USB when a session ends.
-total=$(( ${#sends[@]} / 2 ))
-echo "… sending $total book(s)"
-sent=$(mtp-connect "${sends[@]}" 2>&1 | grep -c "New file ID" || true)
+# One MTP session for all books: the Kindle ejects itself when a session ends.
+total=${#sends[@]}
+echo "… sending $total book(s)${replace:+, replacing same-named ones}"
+out=$("$helper" ${replace:+-r} "${sends[@]}" 2>&1 || true)
+grep '^replaced ' <<<"$out" | sed 's/^replaced /↻ replaced /' || true
+sent=$(grep -c '^sent ' <<<"$out" || true)
 
 if [ "$sent" -eq "$total" ]; then
   echo "✓ sent $sent book(s) to the Kindle"
