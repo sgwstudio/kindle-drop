@@ -13,6 +13,32 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 sends=()
 failed=0
+screen=1680  # Paperwhite screen height in pixels
+
+# A scan is a PDF whose middle page is one image as wide as the page.
+is_scan() {
+  local n p w
+  n=$(pdfinfo "$1" 2>/dev/null | awk '/^Pages:/{print $2}')
+  [ -n "$n" ] || return 1
+  p=$(( (n + 1) / 2 ))
+  w=$(pdfinfo -f $p -l $p "$1" | awk '/size:/{print $4; exit}')
+  pdfimages -list -f $p -l $p "$1" | awk -v w="$w" 'NR>2 && $3=="image" && $13>0 && $4/$13*72 >= 0.9*w {f=1} END{exit !f}'
+}
+
+# Scans often stack several image layers per page and tint the paper grey,
+# which makes a Kindle slow and the page dark. Flatten every page to one
+# black-and-white image at screen height: white paper, black text, light file.
+clean_scan() {
+  local dir title author
+  dir=$(mktemp -d "$tmp/scan.XXXX")
+  pdftoppm -gray -scale-to-x -1 -scale-to-y $screen "$1" "$dir/p" || return 1
+  (cd "$dir" && ls *.pgm | xargs -P 8 -I{} magick {} -auto-level -level 15%,73% -threshold 55% -compress Group4 {}.tif) || return 1
+  magick -density 300 "$dir"/*.tif -compress Group4 "$2" || return 1
+  # Keep the title and author the Kindle library shows.
+  title=$(pdfinfo "$1" | sed -n 's/^Title: *//p')
+  author=$(pdfinfo "$1" | sed -n 's/^Author: *//p')
+  [ -z "$title" ] || "$(dirname "$convert")/ebook-meta" "$2" -t "$title" ${author:+-a "$author"} >/dev/null 2>&1 || true
+}
 
 # Stage every book in $tmp. libmtp splits "local,remote" on the first comma,
 # so staged names drop commas.
@@ -25,7 +51,18 @@ for book in "$@"; do
 
   # Kindle reads these as-is. Everything else (epub, fb2, docx...) becomes azw3.
   case "$ext" in
-    azw3|azw|mobi|kfx|pdf|txt) cp "$book" "$tmp/$base.$ext" && file="$tmp/$base.$ext" ;;
+    azw3|azw|mobi|kfx|txt) cp "$book" "$tmp/$base.$ext" && file="$tmp/$base.$ext" ;;
+    pdf)
+      command -v pdfimages >/dev/null && command -v magick >/dev/null \
+        || { echo "missing PDF tools: brew install poppler imagemagick" >&2; exit 1; }
+      file="$tmp/$base.pdf"
+      if is_scan "$book"; then
+        echo "… cleaning scan $name"
+        clean_scan "$book" "$file" || { echo "✗ $name: scan cleanup failed"; failed=1; continue; }
+      else
+        cp "$book" "$file"
+      fi
+      ;;
     *)
       [ -x "$convert" ] || { echo "missing calibre: brew install --cask calibre" >&2; exit 1; }
       file="$tmp/$base.azw3"
